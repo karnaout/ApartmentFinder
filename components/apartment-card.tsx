@@ -1,24 +1,36 @@
 "use client";
 
+import * as React from "react";
 import Link from "next/link";
 import { Bed, Bath, Ruler, MapPin, Trash2, ExternalLink, Check } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ScoreBadge } from "@/components/score-badge";
 import { formatCurrency, formatNumber, cn } from "@/lib/utils";
 import { useStore } from "@/lib/store";
-import { scoreApartment } from "@/lib/scoring";
+import { scoreApartment, scoreBg } from "@/lib/scoring";
 import type { Apartment } from "@/lib/types";
 
 export function ApartmentCard({ apt }: { apt: Apartment }) {
   const factors = useStore((s) => s.factors);
+  const buckets = useStore((s) => s.buckets);
+  const targetBudget = useStore((s) => s.targetBudget);
   const comparing = useStore((s) => s.comparing);
   const toggleCompare = useStore((s) => s.toggleCompare);
   const removeApartment = useStore((s) => s.removeApartment);
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
   const isComparing = comparing.includes(apt.id);
 
-  const score = scoreApartment(apt, factors);
+  const score = scoreApartment(apt, factors, buckets, targetBudget);
 
   return (
     <Card className="overflow-hidden flex flex-col group hover:shadow-md transition-shadow">
@@ -90,6 +102,34 @@ export function ApartmentCard({ apt }: { apt: Apartment }) {
           )}
         </div>
 
+        <div className="grid grid-cols-3 gap-1.5 mt-1">
+          {buckets.map((b) => {
+            const bb = score.buckets.find((x) => x.bucketId === b.id);
+            const has = bb && bb.usedWeight > 0;
+            const v = has ? bb.score : 0;
+            return (
+              <div key={b.id} className="space-y-1">
+                <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <span>{b.name.slice(0, 4)}</span>
+                  <span className="tabular-nums font-medium text-foreground">
+                    {has ? Math.round(v) : "—"}
+                  </span>
+                </div>
+                <div className="h-1 rounded-full bg-secondary overflow-hidden">
+                  {has ? (
+                    <div
+                      className={cn("h-full", scoreBg(v))}
+                      style={{ width: `${v}%` }}
+                    />
+                  ) : (
+                    <div className="h-full bg-muted-foreground/20" />
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
         {score.hasMissing && (
           <p className="text-[11px] text-amber-600 dark:text-amber-400">
             Some factors are missing values — fill them in to refine the score.
@@ -125,9 +165,7 @@ export function ApartmentCard({ apt }: { apt: Apartment }) {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => {
-              if (confirm("Delete this apartment?")) removeApartment(apt.id);
-            }}
+            onClick={() => setConfirmOpen(true)}
             className={cn("text-muted-foreground hover:text-destructive")}
             title="Delete"
           >
@@ -135,6 +173,30 @@ export function ApartmentCard({ apt }: { apt: Apartment }) {
           </Button>
         </div>
       </div>
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete apartment?</DialogTitle>
+            <DialogDescription>
+              This will permanently remove <strong>{apt.title || "this apartment"}</strong> from your list.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                removeApartment(apt.id);
+                setConfirmOpen(false);
+              }}
+            >
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

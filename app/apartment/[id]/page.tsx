@@ -18,16 +18,63 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ScoreBadge } from "@/components/score-badge";
 import { FactorInput } from "@/components/factor-input";
 import { SuggestionBadge } from "@/components/suggestion-badge";
 import { AgentProgress } from "@/components/agent-progress";
-import { scoreApartment, scoreBg } from "@/lib/scoring";
+import { BucketIcon } from "@/components/bucket-icon";
+import { scoreApartment, scoreBg, scoreColor } from "@/lib/scoring";
 import { cn, formatCurrency } from "@/lib/utils";
 import { toast } from "@/components/ui/toaster";
-import type { EnrichmentResult, EnrichmentSuggestion } from "@/lib/types";
+import { trueMonthlyCost } from "@/lib/types";
+import type {
+  BucketId,
+  EnrichmentResult,
+  EnrichmentSuggestion,
+  Factor,
+} from "@/lib/types";
 import type { AgentEvent } from "@/lib/enrich/events";
 import { readAgentStream } from "@/lib/enrich/events";
+
+const BASIC_TEXT_FIELDS = new Set([
+  "title",
+  "address",
+  "city",
+  "state",
+  "zip",
+  "imageUrl",
+]);
+const BASIC_NUMBER_FIELDS = new Set([
+  "price",
+  "bedrooms",
+  "bathrooms",
+  "sqft",
+  "parkingCost",
+  "utilities",
+  "petFees",
+  "requiredFees",
+  "upfrontCost",
+]);
+
+/**
+ * Factor IDs whose value is read from the apartment-level field directly
+ * (and edited via the Listing details / Financial extras sections above),
+ * so we hide the duplicate factor input.
+ */
+const LINKED_FACTOR_IDS = new Set([
+  "f-sqft",
+  "f-upfront",
+  "f-utilities",
+  "f-parking-cost",
+]);
 
 export default function ApartmentDetailPage() {
   const params = useParams<{ id: string }>();
@@ -35,7 +82,9 @@ export default function ApartmentDetailPage() {
   const id = params.id;
 
   const apartment = useStore((s) => s.apartments.find((a) => a.id === id));
+  const buckets = useStore((s) => s.buckets);
   const factors = useStore((s) => s.factors);
+  const targetBudget = useStore((s) => s.targetBudget);
   const updateApartment = useStore((s) => s.updateApartment);
   const setValue = useStore((s) => s.setValue);
   const removeApartment = useStore((s) => s.removeApartment);
@@ -47,6 +96,7 @@ export default function ApartmentDetailPage() {
   const [suggestions, setSuggestions] = React.useState<EnrichmentSuggestion[]>([]);
   const [aiNotes, setAiNotes] = React.useState<string | null>(null);
   const [agentEvents, setAgentEvents] = React.useState<AgentEvent[]>([]);
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
 
   const suggestionsByField = React.useMemo(() => {
     const m = new Map<string, EnrichmentSuggestion>();
@@ -73,6 +123,8 @@ export default function ApartmentDetailPage() {
           url: apartment.url,
           draft: apartment,
           factors,
+          buckets,
+          targetBudget,
         }),
       });
       if (!res.ok) {
@@ -111,26 +163,12 @@ export default function ApartmentDetailPage() {
   function acceptSuggestion(s: EnrichmentSuggestion) {
     if (!apartment) return;
     if (s.value === null || s.value === undefined) return;
-    const basicFields = new Set([
-      "title",
-      "address",
-      "city",
-      "state",
-      "zip",
-      "price",
-      "bedrooms",
-      "bathrooms",
-      "sqft",
-    ]);
-    if (basicFields.has(s.field)) {
-      const numeric =
-        s.field === "price" ||
-        s.field === "bedrooms" ||
-        s.field === "bathrooms" ||
-        s.field === "sqft";
-      updateApartment(apartment.id, {
-        [s.field]: numeric ? Number(s.value) : String(s.value),
-      });
+
+    if (BASIC_TEXT_FIELDS.has(s.field)) {
+      updateApartment(apartment.id, { [s.field]: String(s.value) });
+    } else if (BASIC_NUMBER_FIELDS.has(s.field)) {
+      const n = Number(s.value);
+      if (!Number.isNaN(n)) updateApartment(apartment.id, { [s.field]: n });
     } else {
       const factor = factors.find((f) => f.id === s.field);
       if (!factor) return;
@@ -167,7 +205,17 @@ export default function ApartmentDetailPage() {
     );
   }
 
-  const score = scoreApartment(apartment, factors);
+  const score = scoreApartment(apartment, factors, buckets, targetBudget);
+  const trueCost = trueMonthlyCost(apartment);
+
+  const factorsByBucket: Record<BucketId, Factor[]> = {
+    apartment: [],
+    location: [],
+    financial: [],
+  };
+  for (const f of factors) {
+    if (f.bucketId in factorsByBucket) factorsByBucket[f.bucketId].push(f);
+  }
 
   return (
     <div className="space-y-6 animate-fade-in max-w-4xl">
@@ -181,17 +229,37 @@ export default function ApartmentDetailPage() {
         <Button
           variant="ghost"
           className="text-muted-foreground hover:text-destructive"
-          onClick={() => {
-            if (confirm("Delete this apartment?")) {
-              removeApartment(apartment.id);
-              router.push("/");
-            }
-          }}
+          onClick={() => setConfirmOpen(true)}
         >
           <Trash2 className="h-4 w-4" />
           Delete
         </Button>
       </div>
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete apartment?</DialogTitle>
+            <DialogDescription>
+              This will permanently remove <strong>{apartment.title || "this apartment"}</strong> from your list.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                removeApartment(apartment.id);
+                setConfirmOpen(false);
+                router.push("/");
+              }}
+            >
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Card className="overflow-hidden">
         {apartment.imageUrl && (
@@ -210,8 +278,13 @@ export default function ApartmentDetailPage() {
                 .filter(Boolean)
                 .join(", ")}
             </div>
-            <div className="flex items-center gap-3 mt-2">
+            <div className="flex items-center gap-3 mt-2 flex-wrap">
               <span className="font-semibold">{formatCurrency(apartment.price)}</span>
+              {trueCost != null && trueCost !== apartment.price && (
+                <span className="text-xs text-muted-foreground">
+                  · True cost {formatCurrency(trueCost)}/mo
+                </span>
+              )}
               {apartment.url && (
                 <a
                   href={apartment.url}
@@ -226,8 +299,56 @@ export default function ApartmentDetailPage() {
             </div>
           </div>
         </div>
+
+        {/* Bucket scores */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 border-t">
+          {buckets.map((b) => {
+            const bb = score.buckets.find((x) => x.bucketId === b.id);
+            const v = bb?.score ?? 0;
+            const share = (() => {
+              const total = buckets.reduce((s, x) => s + x.weight, 0);
+              return total > 0 ? (b.weight / total) * 100 : 0;
+            })();
+            return (
+              <div key={b.id} className="p-4 border-l first:border-l-0">
+                <div className="flex items-center gap-2">
+                  <BucketIcon id={b.id} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs uppercase tracking-wider text-muted-foreground">
+                      {b.name}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {share.toFixed(0)}% of final
+                    </div>
+                  </div>
+                  <div
+                    className={cn("text-2xl font-semibold tabular-nums", scoreColor(v))}
+                  >
+                    {bb && bb.usedWeight > 0 ? Math.round(v) : "—"}
+                  </div>
+                </div>
+                <div className="mt-3 h-1.5 rounded-full bg-secondary overflow-hidden">
+                  {bb && bb.usedWeight > 0 ? (
+                    <div
+                      className={cn("h-full transition-all", scoreBg(v))}
+                      style={{ width: `${v}%` }}
+                    />
+                  ) : (
+                    <div className="h-full bg-muted-foreground/20" />
+                  )}
+                </div>
+                {bb?.hasMissing && (
+                  <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-2">
+                    Some factors are missing — fill them in to refine.
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </Card>
 
+      {/* AI enrichment */}
       <Card className="p-5">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-3">
@@ -287,39 +408,7 @@ export default function ApartmentDetailPage() {
         )}
       </Card>
 
-      <Card className="p-6">
-        <h2 className="text-sm font-medium mb-4">Score breakdown</h2>
-        <div className="space-y-2">
-          {factors.map((f) => {
-            const c = score.contributions.find((c) => c.factorId === f.id);
-            const norm = c?.normalized;
-            return (
-              <div key={f.id} className="grid grid-cols-[1fr_3fr_auto] items-center gap-3">
-                <div className="text-sm truncate">
-                  {f.name}{" "}
-                  <span className="text-xs text-muted-foreground">
-                    ({(f.weight / Math.max(1, factors.reduce((s, x) => s + x.weight, 0)) * 100).toFixed(0)}%)
-                  </span>
-                </div>
-                <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-                  {norm != null ? (
-                    <div
-                      className={cn("h-full transition-all", scoreBg(norm * 100))}
-                      style={{ width: `${norm * 100}%` }}
-                    />
-                  ) : (
-                    <div className="h-full bg-muted-foreground/20" />
-                  )}
-                </div>
-                <div className="text-xs tabular-nums w-12 text-right text-muted-foreground">
-                  {norm == null ? "—" : `${(norm * 100).toFixed(0)}`}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </Card>
-
+      {/* Listing basics */}
       <Card className="p-6">
         <h2 className="text-sm font-medium mb-4">Listing details</h2>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -327,7 +416,9 @@ export default function ApartmentDetailPage() {
             label="Rent ($/mo)"
             type="number"
             value={apartment.price ?? ""}
-            onChange={(v) => updateApartment(apartment.id, { price: v === "" ? undefined : Number(v) })}
+            onChange={(v) =>
+              updateApartment(apartment.id, { price: v === "" ? undefined : Number(v) })
+            }
             suggestion={suggestionsByField.get("price")}
             onAccept={acceptSuggestion}
             onDismiss={dismissSuggestion}
@@ -370,21 +461,177 @@ export default function ApartmentDetailPage() {
         </div>
       </Card>
 
+      {/* Financial extras */}
       <Card className="p-6">
-        <h2 className="text-sm font-medium mb-4">Your ratings</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
-          {factors.map((f) => {
-            const s = suggestionsByField.get(f.id);
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <h2 className="text-sm font-medium flex items-center gap-2">
+            <BucketIcon id="financial" />
+            Financial extras
+          </h2>
+          <span className="text-xs text-muted-foreground tabular-nums">
+            True cost {formatCurrency(trueCost)}/mo · Budget {formatCurrency(targetBudget)}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <Field
+            label="Parking ($/mo)"
+            type="number"
+            value={apartment.parkingCost ?? ""}
+            onChange={(v) =>
+              updateApartment(apartment.id, { parkingCost: v === "" ? undefined : Number(v) })
+            }
+            suggestion={suggestionsByField.get("parkingCost")}
+            onAccept={acceptSuggestion}
+            onDismiss={dismissSuggestion}
+          />
+          <Field
+            label="Utilities ($/mo)"
+            type="number"
+            value={apartment.utilities ?? ""}
+            onChange={(v) =>
+              updateApartment(apartment.id, { utilities: v === "" ? undefined : Number(v) })
+            }
+            suggestion={suggestionsByField.get("utilities")}
+            onAccept={acceptSuggestion}
+            onDismiss={dismissSuggestion}
+          />
+          <Field
+            label="Pet fees ($/mo)"
+            type="number"
+            value={apartment.petFees ?? ""}
+            onChange={(v) =>
+              updateApartment(apartment.id, { petFees: v === "" ? undefined : Number(v) })
+            }
+            suggestion={suggestionsByField.get("petFees")}
+            onAccept={acceptSuggestion}
+            onDismiss={dismissSuggestion}
+          />
+          <Field
+            label="Other fees ($/mo)"
+            type="number"
+            value={apartment.requiredFees ?? ""}
+            onChange={(v) =>
+              updateApartment(apartment.id, { requiredFees: v === "" ? undefined : Number(v) })
+            }
+            suggestion={suggestionsByField.get("requiredFees")}
+            onAccept={acceptSuggestion}
+            onDismiss={dismissSuggestion}
+          />
+          <Field
+            label="Upfront cost ($)"
+            type="number"
+            value={apartment.upfrontCost ?? ""}
+            onChange={(v) =>
+              updateApartment(apartment.id, { upfrontCost: v === "" ? undefined : Number(v) })
+            }
+            suggestion={suggestionsByField.get("upfrontCost")}
+            onAccept={acceptSuggestion}
+            onDismiss={dismissSuggestion}
+          />
+        </div>
+      </Card>
+
+      {/* Factor inputs grouped by bucket */}
+      {buckets.map((b) => {
+        const bucketFactors = factorsByBucket[b.id];
+        if (bucketFactors.length === 0) return null;
+        const bb = score.buckets.find((x) => x.bucketId === b.id);
+        return (
+          <Card key={b.id} className="p-6">
+            <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+              <h2 className="text-sm font-medium flex items-center gap-2">
+                <BucketIcon id={b.id} />
+                {b.name} factors
+              </h2>
+              {bb && bb.usedWeight > 0 && (
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  Bucket score: <span className={cn("font-semibold", scoreColor(bb.score))}>{Math.round(bb.score)}</span>
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
+              {bucketFactors.map((f) => {
+                if (LINKED_FACTOR_IDS.has(f.id)) return null;
+                const s = suggestionsByField.get(f.id);
+                let derived: { primary: string; secondary?: string } | undefined;
+                if (f.type === "rent_vs_budget") {
+                  const cost =
+                    f.costMode === "true_cost" ? trueCost : (apartment.price ?? null);
+                  const c = score.contributions.find((x) => x.factorId === f.id);
+                  derived = {
+                    primary:
+                      cost == null
+                        ? "—"
+                        : `${formatCurrency(cost)} vs ${formatCurrency(targetBudget)}`,
+                    secondary:
+                      c?.raw != null
+                        ? `score ${Math.round(c.raw)}`
+                        : "needs rent + budget",
+                  };
+                }
+                return (
+                  <FactorInput
+                    key={f.id}
+                    factor={f}
+                    value={apartment.values[f.id]}
+                    onChange={(v) => setValue(apartment.id, f.id, v)}
+                    suggestion={s}
+                    onAcceptSuggestion={s ? () => acceptSuggestion(s) : undefined}
+                    onDismissSuggestion={s ? () => dismissSuggestion(s.field) : undefined}
+                    derivedDisplay={derived}
+                  />
+                );
+              })}
+            </div>
+          </Card>
+        );
+      })}
+
+      {/* Per-factor breakdown */}
+      <Card className="p-6">
+        <h2 className="text-sm font-medium mb-4">Score breakdown</h2>
+        <div className="space-y-5">
+          {buckets.map((b) => {
+            const bucketFactors = factorsByBucket[b.id];
+            if (bucketFactors.length === 0) return null;
+            const sumWeight = bucketFactors.reduce((s, f) => s + f.weight, 0);
             return (
-              <FactorInput
-                key={f.id}
-                factor={f}
-                value={apartment.values[f.id]}
-                onChange={(v) => setValue(apartment.id, f.id, v)}
-                suggestion={s}
-                onAcceptSuggestion={s ? () => acceptSuggestion(s) : undefined}
-                onDismissSuggestion={s ? () => dismissSuggestion(s.field) : undefined}
-              />
+              <div key={b.id} className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <BucketIcon id={b.id} />
+                  <h3 className="text-xs uppercase tracking-wider text-muted-foreground font-medium">
+                    {b.name}
+                  </h3>
+                </div>
+                {bucketFactors.map((f) => {
+                  const c = score.contributions.find((x) => x.factorId === f.id);
+                  const raw = c?.raw;
+                  const share = sumWeight > 0 ? (f.weight / sumWeight) * 100 : 0;
+                  return (
+                    <div key={f.id} className="grid grid-cols-[1fr_3fr_auto] items-center gap-3">
+                      <div className="text-sm truncate">
+                        {f.name}{" "}
+                        <span className="text-xs text-muted-foreground">
+                          ({share.toFixed(0)}%)
+                        </span>
+                      </div>
+                      <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+                        {raw != null ? (
+                          <div
+                            className={cn("h-full transition-all", scoreBg(raw))}
+                            style={{ width: `${raw}%` }}
+                          />
+                        ) : (
+                          <div className="h-full bg-muted-foreground/20" />
+                        )}
+                      </div>
+                      <div className="text-xs tabular-nums w-12 text-right text-muted-foreground">
+                        {raw == null ? "—" : Math.round(raw)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             );
           })}
         </div>
@@ -399,7 +646,7 @@ export default function ApartmentDetailPage() {
           rows={4}
           value={apartment.notes ?? ""}
           onChange={(e) => updateApartment(apartment.id, { notes: e.target.value })}
-          placeholder="Tour notes, gut feelings, follow-ups…"
+          placeholder="Tour notes, gut feelings, follow-ups, why you scored what you did…"
         />
         <Button
           variant="ghost"

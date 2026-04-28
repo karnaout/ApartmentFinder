@@ -19,6 +19,7 @@ export function FactorInput({
   suggestion,
   onAcceptSuggestion,
   onDismissSuggestion,
+  derivedDisplay,
 }: {
   factor: Factor;
   value: Value;
@@ -27,6 +28,12 @@ export function FactorInput({
   suggestion?: EnrichmentSuggestion;
   onAcceptSuggestion?: () => void;
   onDismissSuggestion?: () => void;
+  /**
+   * For computed factor types (e.g. rent_vs_budget) the value is derived from
+   * other apartment fields, not entered directly. Pass the computed display
+   * (cost + score caption) and we'll render a read-only summary.
+   */
+  derivedDisplay?: { primary: string; secondary?: string };
 }) {
   const hint =
     suggestion && onAcceptSuggestion && onDismissSuggestion ? (
@@ -37,6 +44,27 @@ export function FactorInput({
         compact
       />
     ) : null;
+
+  if (factor.type === "rent_vs_budget") {
+    return (
+      <div className={cn("space-y-1", className)}>
+        <Label className="font-normal">{factor.name}</Label>
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-sm tabular-nums">
+            {derivedDisplay?.primary ?? "—"}
+          </span>
+          {derivedDisplay?.secondary && (
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {derivedDisplay.secondary}
+            </span>
+          )}
+        </div>
+        {factor.description && (
+          <p className="text-xs text-muted-foreground">{factor.description}</p>
+        )}
+      </div>
+    );
+  }
 
   if (factor.type === "boolean") {
     return (
@@ -54,17 +82,13 @@ export function FactorInput({
   }
 
   if (factor.type === "rating") {
-    const min = factor.min ?? 1;
-    const max = factor.max ?? 10;
     const numeric = typeof value === "number" ? value : null;
     return (
       <div className={cn("space-y-2", className)}>
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <Label className="font-normal">
             {factor.name}{" "}
-            <span className="text-xs text-muted-foreground">
-              ({min}–{max})
-            </span>
+            <span className="text-xs text-muted-foreground">(1–10)</span>
           </Label>
           <div className="flex items-center gap-2">
             {hint}
@@ -74,16 +98,17 @@ export function FactorInput({
           </div>
         </div>
         <Slider
-          min={min}
-          max={max}
+          min={1}
+          max={10}
           step={1}
-          value={[numeric ?? Math.round((min + max) / 2)]}
+          value={[numeric ?? 5]}
           onValueChange={([v]) => onChange(v)}
         />
       </div>
     );
   }
 
+  // numeric
   return (
     <div className={cn("space-y-1.5", className)}>
       <div className="flex items-center justify-between gap-2 flex-wrap">

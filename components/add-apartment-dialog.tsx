@@ -19,19 +19,23 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useStore } from "@/lib/store";
 import type {
   Apartment,
+  Bucket,
+  BucketId,
   EnrichmentResult,
   EnrichmentSuggestion,
   Factor,
   ImportedListing,
 } from "@/lib/types";
+import { trueMonthlyCost } from "@/lib/types";
 import { detectSource } from "@/lib/scrape";
 import { FactorInput } from "@/components/factor-input";
 import { SuggestionBadge } from "@/components/suggestion-badge";
 import { AgentProgress } from "@/components/agent-progress";
+import { BucketIcon } from "@/components/bucket-icon";
 import type { AgentEvent } from "@/lib/enrich/events";
 import { readAgentStream } from "@/lib/enrich/events";
 import { toast } from "@/components/ui/toaster";
-import { cn } from "@/lib/utils";
+import { cn, formatCurrency } from "@/lib/utils";
 
 type Draft = Omit<Apartment, "id" | "createdAt" | "updatedAt">;
 
@@ -40,17 +44,37 @@ const empty: Draft = {
   values: {},
 };
 
-const BASIC_FIELDS: (keyof Draft)[] = [
+const BASIC_TEXT_FIELDS = new Set([
   "title",
   "address",
   "city",
   "state",
   "zip",
+  "imageUrl",
+]);
+const BASIC_NUMBER_FIELDS = new Set([
   "price",
   "bedrooms",
   "bathrooms",
   "sqft",
-];
+  "parkingCost",
+  "utilities",
+  "petFees",
+  "requiredFees",
+  "upfrontCost",
+]);
+
+/**
+ * Factor IDs whose value comes from the apartment-level field shown elsewhere
+ * in the form (Listing details / Financial extras). We hide the duplicate
+ * factor input but they still count in scoring.
+ */
+const LINKED_FACTOR_IDS = new Set([
+  "f-sqft",
+  "f-upfront",
+  "f-utilities",
+  "f-parking-cost",
+]);
 
 export function AddApartmentDialog({
   open,
@@ -59,7 +83,9 @@ export function AddApartmentDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const buckets = useStore((s) => s.buckets);
   const factors = useStore((s) => s.factors);
+  const targetBudget = useStore((s) => s.targetBudget);
   const addApartment = useStore((s) => s.addApartment);
   const openaiApiKey = useStore((s) => s.openaiApiKey);
   const preferredModel = useStore((s) => s.preferredModel);
@@ -71,7 +97,6 @@ export function AddApartmentDialog({
   const [draft, setDraft] = React.useState<Draft>(empty);
   const [step, setStep] = React.useState<"input" | "review">("input");
 
-  // AI enrichment state
   const [enriching, setEnriching] = React.useState(false);
   const [enrichError, setEnrichError] = React.useState<string | null>(null);
   const [suggestions, setSuggestions] = React.useState<EnrichmentSuggestion[]>([]);
@@ -179,6 +204,8 @@ export function AddApartmentDialog({
           url: draft.url,
           draft,
           factors,
+          buckets,
+          targetBudget,
         }),
       });
       if (!res.ok) {
@@ -216,21 +243,15 @@ export function AddApartmentDialog({
     }
   }
 
-  /**
-   * Apply a single suggestion to the draft. Pure: doesn't touch suggestion list.
-   */
   function applyToDraft(d: Draft, s: EnrichmentSuggestion, factorList: Factor[]): Draft {
     if (s.value === null || s.value === undefined) return d;
-    if (BASIC_FIELDS.includes(s.field as keyof Draft)) {
-      const numeric =
-        s.field === "price" ||
-        s.field === "bedrooms" ||
-        s.field === "bathrooms" ||
-        s.field === "sqft";
-      return {
-        ...d,
-        [s.field]: numeric ? Number(s.value) : String(s.value),
-      };
+    if (BASIC_TEXT_FIELDS.has(s.field)) {
+      return { ...d, [s.field]: String(s.value) };
+    }
+    if (BASIC_NUMBER_FIELDS.has(s.field)) {
+      const n = Number(s.value);
+      if (Number.isNaN(n)) return d;
+      return { ...d, [s.field]: n };
     }
     const factor = factorList.find((f) => f.id === s.field);
     if (!factor) return d;
@@ -284,7 +305,7 @@ export function AddApartmentDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
             {step === "input" ? "Add apartment" : "Review & save"}
@@ -370,7 +391,9 @@ export function AddApartmentDialog({
           <ReviewForm
             draft={draft}
             setDraft={setDraft}
+            buckets={buckets}
             factors={factors}
+            targetBudget={targetBudget}
             suggestions={suggestions}
             onAcceptSuggestion={acceptSuggestion}
             onDismissSuggestion={dismissSuggestion}
@@ -402,7 +425,9 @@ export function AddApartmentDialog({
 function ReviewForm({
   draft,
   setDraft,
+  buckets,
   factors,
+  targetBudget,
   suggestions,
   onAcceptSuggestion,
   onDismissSuggestion,
@@ -416,7 +441,9 @@ function ReviewForm({
 }: {
   draft: Draft;
   setDraft: React.Dispatch<React.SetStateAction<Draft>>;
+  buckets: Bucket[];
   factors: Factor[];
+  targetBudget: number;
   suggestions: EnrichmentSuggestion[];
   onAcceptSuggestion: (s: EnrichmentSuggestion) => void;
   onDismissSuggestion: (field: string) => void;
@@ -431,18 +458,14 @@ function ReviewForm({
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }));
 
-  const builtIn = new Set([
-    "price",
-    "rent",
-    "sqft",
-    "square feet",
-    "size",
-    "bedrooms",
-    "beds",
-    "bathrooms",
-    "baths",
-  ]);
-  const customFactors = factors.filter((f) => !builtIn.has(f.name.toLowerCase()));
+  const factorsByBucket: Record<BucketId, Factor[]> = {
+    apartment: [],
+    location: [],
+    financial: [],
+  };
+  for (const f of factors) {
+    if (f.bucketId in factorsByBucket) factorsByBucket[f.bucketId].push(f);
+  }
 
   const suggestionsByField = React.useMemo(() => {
     const m = new Map<string, EnrichmentSuggestion>();
@@ -453,6 +476,8 @@ function ReviewForm({
   const acceptableCount = suggestions.filter(
     (s) => s.value != null && s.confidence !== "low",
   ).length;
+
+  const trueCost = trueMonthlyCost(draft);
 
   return (
     <div className="space-y-5">
@@ -592,37 +617,114 @@ function ReviewForm({
         />
       </div>
 
-      {customFactors.length > 0 && (
-        <div className="space-y-3">
-          <div>
-            <h4 className="text-sm font-medium">Your factors</h4>
-            <p className="text-xs text-muted-foreground">
-              Rate this place on the criteria you defined. Skip anything you don&apos;t know yet.
-            </p>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 rounded-lg bg-muted/40 border">
-            {customFactors.map((f) => {
-              const s = suggestionsByField.get(f.id);
-              return (
-                <FactorInput
-                  key={f.id}
-                  factor={f}
-                  value={draft.values[f.id]}
-                  onChange={(v) =>
-                    setDraft((d) => ({
-                      ...d,
-                      values: { ...d.values, [f.id]: v },
-                    }))
-                  }
-                  suggestion={s}
-                  onAcceptSuggestion={s ? () => onAcceptSuggestion(s) : undefined}
-                  onDismissSuggestion={s ? () => onDismissSuggestion(s.field) : undefined}
-                />
-              );
-            })}
-          </div>
+      {/* Financial extras */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <h4 className="text-sm font-medium flex items-center gap-2">
+            <BucketIcon id="financial" />
+            Financial extras (optional)
+          </h4>
+          <span className="text-xs text-muted-foreground tabular-nums">
+            True cost {formatCurrency(trueCost)}/mo · Budget {formatCurrency(targetBudget)}
+          </span>
         </div>
-      )}
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 p-4 rounded-lg bg-muted/40 border">
+          <BasicField
+            label="Parking ($/mo)"
+            type="number"
+            value={draft.parkingCost ?? ""}
+            onChange={(v) => set("parkingCost", v === "" ? undefined : Number(v))}
+            suggestion={suggestionsByField.get("parkingCost")}
+            onAcceptSuggestion={onAcceptSuggestion}
+            onDismissSuggestion={onDismissSuggestion}
+          />
+          <BasicField
+            label="Utilities ($/mo)"
+            type="number"
+            value={draft.utilities ?? ""}
+            onChange={(v) => set("utilities", v === "" ? undefined : Number(v))}
+            suggestion={suggestionsByField.get("utilities")}
+            onAcceptSuggestion={onAcceptSuggestion}
+            onDismissSuggestion={onDismissSuggestion}
+          />
+          <BasicField
+            label="Pet fees ($/mo)"
+            type="number"
+            value={draft.petFees ?? ""}
+            onChange={(v) => set("petFees", v === "" ? undefined : Number(v))}
+            suggestion={suggestionsByField.get("petFees")}
+            onAcceptSuggestion={onAcceptSuggestion}
+            onDismissSuggestion={onDismissSuggestion}
+          />
+          <BasicField
+            label="Other fees ($/mo)"
+            type="number"
+            value={draft.requiredFees ?? ""}
+            onChange={(v) => set("requiredFees", v === "" ? undefined : Number(v))}
+            suggestion={suggestionsByField.get("requiredFees")}
+            onAcceptSuggestion={onAcceptSuggestion}
+            onDismissSuggestion={onDismissSuggestion}
+          />
+          <BasicField
+            label="Upfront ($)"
+            type="number"
+            value={draft.upfrontCost ?? ""}
+            onChange={(v) => set("upfrontCost", v === "" ? undefined : Number(v))}
+            suggestion={suggestionsByField.get("upfrontCost")}
+            onAcceptSuggestion={onAcceptSuggestion}
+            onDismissSuggestion={onDismissSuggestion}
+          />
+        </div>
+      </div>
+
+      {/* Factor inputs grouped by bucket */}
+      {buckets.map((b) => {
+        const bucketFactors = factorsByBucket[b.id];
+        if (bucketFactors.length === 0) return null;
+        return (
+          <div key={b.id} className="space-y-2">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <BucketIcon id={b.id} />
+              {b.name} factors
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4 p-4 rounded-lg bg-muted/40 border">
+              {bucketFactors.map((f) => {
+                if (LINKED_FACTOR_IDS.has(f.id)) return null;
+                const s = suggestionsByField.get(f.id);
+                let derived: { primary: string; secondary?: string } | undefined;
+                if (f.type === "rent_vs_budget") {
+                  const cost =
+                    f.costMode === "true_cost" ? trueCost : (draft.price ?? null);
+                  derived = {
+                    primary:
+                      cost == null
+                        ? "—"
+                        : `${formatCurrency(cost)} vs ${formatCurrency(targetBudget)}`,
+                    secondary: cost == null ? "needs rent + budget" : undefined,
+                  };
+                }
+                return (
+                  <FactorInput
+                    key={f.id}
+                    factor={f}
+                    value={draft.values[f.id]}
+                    onChange={(v) =>
+                      setDraft((d) => ({
+                        ...d,
+                        values: { ...d.values, [f.id]: v },
+                      }))
+                    }
+                    suggestion={s}
+                    onAcceptSuggestion={s ? () => onAcceptSuggestion(s) : undefined}
+                    onDismissSuggestion={s ? () => onDismissSuggestion(s.field) : undefined}
+                    derivedDisplay={derived}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
 
       <div className="space-y-1.5">
         <Label>Notes</Label>
@@ -661,7 +763,7 @@ function BasicField({
   return (
     <div className="space-y-1.5 min-w-0">
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <Label>{label}</Label>
+        <Label className="text-xs">{label}</Label>
         {suggestion && (
           <SuggestionBadge
             suggestion={suggestion}

@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import type { Apartment, EnrichmentResult, Factor } from "@/lib/types";
+import type { Apartment, Bucket, EnrichmentResult, Factor } from "@/lib/types";
 import { buildEnrichmentPrompt, extractJson } from "@/lib/enrich/prompt";
 import type { AgentEvent } from "@/lib/enrich/events";
 import { detectSource, importListing } from "@/lib/scrape";
@@ -14,6 +14,8 @@ type RequestBody = {
   url?: string;
   draft?: Partial<Apartment>;
   factors?: Factor[];
+  buckets?: Bucket[];
+  targetBudget?: number;
 };
 
 /**
@@ -32,7 +34,15 @@ export async function POST(req: Request) {
     return jsonError("Invalid JSON body", 400);
   }
 
-  const { apiKey, model = "gpt-5", url, draft = {}, factors = [] } = body;
+  const {
+    apiKey,
+    model = "gpt-5",
+    url,
+    draft = {},
+    factors = [],
+    buckets = [],
+    targetBudget,
+  } = body;
   if (!apiKey) {
     return jsonError(
       "Missing OpenAI API key. Add it in Settings → AI to enable enrichment.",
@@ -49,7 +59,13 @@ export async function POST(req: Request) {
 
       try {
         const client = new OpenAI({ apiKey });
-        const { system, user } = buildEnrichmentPrompt({ url, draft, factors });
+        const { system, user } = buildEnrichmentPrompt({
+          url,
+          draft,
+          factors,
+          buckets,
+          targetBudget,
+        });
 
         const tools: OpenAI.Responses.Tool[] = [
           { type: "web_search" },

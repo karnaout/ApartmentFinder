@@ -1,31 +1,53 @@
-export type FactorType = "number" | "rating" | "boolean";
+export type BucketId = "apartment" | "location" | "financial";
+
+export type Bucket = {
+  id: BucketId;
+  name: string;
+  description?: string;
+  /** Weight across buckets. Default sums to 100 but values are normalized at scoring time. */
+  weight: number;
+};
 
 /**
- * A scoring factor, fully user-defined.
- * - "number": absolute number (price, sqft, commute minutes). Score is normalized via min/max.
- * - "rating": user enters 1-10 (or any chosen range). Score is normalized over [min, max].
- * - "boolean": yes/no. Score is 1 if matches `direction === "higher"` (yes is good), else 0.
- *
- * `direction`:
- *   "higher" → bigger raw value is better (e.g., sqft, light, ratings)
- *   "lower"  → smaller raw value is better (e.g., price, commute time, noise)
+ * Scoring types matching the spec:
+ *  - boolean   → Yes = 100, No = 0
+ *  - rating    → manual 1–10 → score = value × 10
+ *  - numeric   → measurable value, normalized via min/max + direction
+ *  - rent_vs_budget → step function over (cost − budget) / budget, see scoring.ts.
+ *                     Uses `costMode` to decide which cost number to compare:
+ *                       "rent"      → apartment.price
+ *                       "true_cost" → rent + parkingCost + utilities + petFees + requiredFees
  */
+export type FactorType = "boolean" | "rating" | "numeric" | "rent_vs_budget";
+
 export type Factor = {
   id: string;
+  bucketId: BucketId;
   name: string;
   description?: string;
   type: FactorType;
-  weight: number; // any positive number; weights are normalized at scoring time
-  direction: "higher" | "lower";
-  min?: number; // for number/rating, used for normalization
-  max?: number; // for number/rating, used for normalization
-  unit?: string; // e.g., "$", "sqft", "min"
+  /** Weight within the bucket. Values normalize at scoring time, so they don't need to sum to 100. */
+  weight: number;
+
+  // numeric only
+  /** Lower bound of the range. Required for numeric. */
+  min?: number;
+  /** Upper bound of the range. Required for numeric. */
+  max?: number;
+  /** "higher": bigger raw value is better. "lower": smaller is better. */
+  direction?: "higher" | "lower";
+  /** Display unit, e.g. "$", "min", "mi", "sqft". */
+  unit?: string;
+
+  // rent_vs_budget only
+  costMode?: "rent" | "true_cost";
 };
 
 export type Apartment = {
   id: string;
   createdAt: number;
   updatedAt: number;
+
   // Listing meta
   title: string;
   url?: string;
@@ -35,17 +57,46 @@ export type Apartment = {
   state?: string;
   zip?: string;
   imageUrl?: string;
-  // Common stats (also exposed as default factor candidates)
-  price?: number;
+
+  // Common stats
+  price?: number; // monthly rent
   bedrooms?: number;
   bathrooms?: number;
   sqft?: number;
-  // Custom factor values, keyed by factor.id.
-  // For "number" / "rating" factors → number.
-  // For "boolean" → boolean.
+
+  // Financial extras (used to compute true monthly cost)
+  parkingCost?: number;
+  utilities?: number;
+  petFees?: number;
+  requiredFees?: number;
+  upfrontCost?: number;
+
+  /**
+   * Custom factor values, keyed by factor.id.
+   *  - boolean → boolean
+   *  - rating  → number (1–10)
+   *  - numeric → number (raw measurement)
+   *  - rent_vs_budget → ignored (computed from financial extras)
+   */
   values: Record<string, number | boolean | null>;
+
   notes?: string;
 };
+
+/**
+ * Compute the true monthly cost: rent + parking + utilities + pet fees + required fees.
+ * Returns null if rent isn't known.
+ */
+export function trueMonthlyCost(a: Pick<Apartment, "price" | "parkingCost" | "utilities" | "petFees" | "requiredFees">): number | null {
+  if (a.price == null) return null;
+  return (
+    (a.price ?? 0) +
+    (a.parkingCost ?? 0) +
+    (a.utilities ?? 0) +
+    (a.petFees ?? 0) +
+    (a.requiredFees ?? 0)
+  );
+}
 
 export type ImportedListing = {
   source: "zillow" | "apartments";
@@ -65,26 +116,27 @@ export type ImportedListing = {
 };
 
 export type ExportPayload = {
-  version: 1;
+  version: 2;
   exportedAt: number;
+  buckets: Bucket[];
   factors: Factor[];
   apartments: Apartment[];
+  targetBudget?: number;
 };
 
 export type Confidence = "low" | "medium" | "high";
 
-/** A single AI-suggested value for a field. */
 export type EnrichmentSuggestion = {
   /**
    * Field identifier:
-   *  - Built-in basics: "title" | "address" | "city" | "state" | "zip" | "price" | "bedrooms" | "bathrooms" | "sqft" | "imageUrl"
+   *  - Built-in basics: "title" | "address" | "city" | "state" | "zip" |
+   *    "price" | "bedrooms" | "bathrooms" | "sqft" | "imageUrl" |
+   *    "parkingCost" | "utilities" | "petFees" | "requiredFees" | "upfrontCost"
    *  - Custom factor: the factor's id (e.g. "f-natural-light")
    */
   field: string;
-  /** The suggested value, type depends on field. */
   value: number | boolean | string | null;
   confidence: Confidence;
-  /** Source URL, or "listing" if pulled from the original listing page. */
   source?: string;
   reasoning?: string;
 };
@@ -92,6 +144,5 @@ export type EnrichmentSuggestion = {
 export type EnrichmentResult = {
   suggestions: EnrichmentSuggestion[];
   notes?: string;
-  /** Best-effort cost / usage hint from the model. */
   usage?: { inputTokens?: number; outputTokens?: number };
 };

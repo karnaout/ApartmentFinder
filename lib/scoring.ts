@@ -1,105 +1,206 @@
-import type { Apartment, Factor } from "./types";
+import type { Apartment, Bucket, BucketId, Factor } from "./types";
+import { trueMonthlyCost } from "./types";
 import { clamp } from "./utils";
 
 /**
- * Returns a normalized factor score in [0, 1] for a given raw value.
- * For "number"/"rating" factors:
- *   - direction "higher": (value - min) / (max - min)
- *   - direction "lower":  (max - value) / (max - min)
- * For "boolean":
- *   - direction "higher": true → 1, false → 0
- *   - direction "lower":  true → 0, false → 1
+ * Returns the per-factor score in [0, 100] for a raw value.
+ *  - boolean         → true → 100, false → 0
+ *  - rating          → value × 10 (so 1 → 10, 10 → 100), per the spec
+ *  - numeric         → linear interpolation between min and max, respecting `direction`
+ *  - rent_vs_budget  → step function; needs `cost` and `budget` to be passed in
  *
- * If value is null/undefined, returns null (factor is "missing").
+ * Returns null if the value is missing.
  */
-export function normalizeFactor(
+export function scoreFactor(
   factor: Factor,
   value: number | boolean | null | undefined,
+  ctx?: { cost?: number | null; budget?: number },
 ): number | null {
+  if (factor.type === "rent_vs_budget") {
+    return scoreRentVsBudget(ctx?.cost ?? null, ctx?.budget ?? 0);
+  }
+
   if (value === null || value === undefined) return null;
 
   if (factor.type === "boolean") {
-    const v = !!value;
-    return factor.direction === "higher" ? (v ? 1 : 0) : v ? 0 : 1;
+    return value ? 100 : 0;
   }
 
+  if (factor.type === "rating") {
+    const num = Number(value);
+    if (Number.isNaN(num)) return null;
+    // Spec: score = manual_score × 10. Clamp into [0, 100] just in case.
+    return clamp(num * 10, 0, 100);
+  }
+
+  // numeric
   const num = Number(value);
   if (Number.isNaN(num)) return null;
-
   const min = factor.min ?? 0;
-  const max = factor.max ?? (factor.type === "rating" ? 10 : 1);
-  if (max === min) return 0.5;
-
+  const max = factor.max ?? 1;
+  if (max === min) return 50;
   const t = clamp((num - min) / (max - min), 0, 1);
-  return factor.direction === "higher" ? t : 1 - t;
+  return (factor.direction === "lower" ? 1 - t : t) * 100;
 }
 
-export type ScoreBreakdown = {
-  /** Total weighted score in [0, 100]. */
-  total: number;
-  /** Per-factor contribution to the total (already weighted, in [0, 100]). */
-  contributions: { factorId: string; weighted: number; normalized: number | null }[];
-  /** Sum of weights actually used (i.e., factors that had a value). */
+/**
+ * Step function from the spec for rent (or true monthly cost) vs target budget.
+ *
+ *  ≤ −15%   → 100
+ *  −15…−5% →  90
+ *  −5…+5%  →  75
+ *  +5…+10% →  50
+ *  +10…+20%→  25
+ *   > +20% →   0
+ *
+ * Returns null if cost or budget is missing/invalid.
+ */
+export function scoreRentVsBudget(cost: number | null | undefined, budget: number): number | null {
+  if (cost == null || !Number.isFinite(cost)) return null;
+  if (!budget || budget <= 0) return null;
+  const pct = (cost - budget) / budget;
+  if (pct <= -0.15) return 100;
+  if (pct <= -0.05) return 90;
+  if (pct <= 0.05) return 75;
+  if (pct <= 0.1) return 50;
+  if (pct <= 0.2) return 25;
+  return 0;
+}
+
+export type FactorContribution = {
+  factorId: string;
+  /** Score in [0, 100] before weighting, or null if missing. */
+  raw: number | null;
+  /** Weight of this factor within its bucket. */
+  weight: number;
+  /** Bucket this factor belongs to. */
+  bucketId: BucketId;
+};
+
+export type BucketBreakdown = {
+  bucketId: BucketId;
+  /** 0–100, weighted average of factor raw scores within this bucket. */
+  score: number;
+  /** Sum of weights with values. */
   usedWeight: number;
-  /** Whether any factor was missing a value. */
+  /** Sum of all weights in this bucket. */
+  totalWeight: number;
+  hasMissing: boolean;
+};
+
+export type ScoreBreakdown = {
+  /** Final score 0–100, rounded. */
+  total: number;
+  /** Per-bucket scores. */
+  buckets: BucketBreakdown[];
+  /** Per-factor breakdown. */
+  contributions: FactorContribution[];
   hasMissing: boolean;
 };
 
 /**
- * Resolves the factor's value for an apartment. For built-in stats (price, sqft,
- * bedrooms, bathrooms), if the apartment has the corresponding top-level field
- * and no explicit value, we fall back to that.
+ * Resolve the value to feed into `scoreFactor`.
+ *  - rent_vs_budget: returns null (the cost is computed separately and passed via ctx)
+ *  - numeric with built-in alias (price/sqft/etc.): falls back to the apartment column.
  */
-function resolveValue(
-  apt: Apartment,
-  factor: Factor,
-): number | boolean | null | undefined {
-  const v = apt.values?.[factor.id];
-  if (v !== undefined && v !== null) return v;
+function resolveValue(apt: Apartment, factor: Factor): number | boolean | null | undefined {
+  const explicit = apt.values?.[factor.id];
+  if (explicit !== undefined && explicit !== null) return explicit;
 
-  // soft fallback: if a factor name maps to a built-in numeric field, use it
-  const name = factor.name.trim().toLowerCase();
-  if (factor.type === "number") {
-    if (name === "price" || name === "rent") return apt.price ?? null;
-    if (name === "sqft" || name === "square feet" || name === "size") return apt.sqft ?? null;
-    if (name === "bedrooms" || name === "beds") return apt.bedrooms ?? null;
-    if (name === "bathrooms" || name === "baths") return apt.bathrooms ?? null;
+  // Built-in numeric aliases by factor id.
+  switch (factor.id) {
+    case "f-sqft":
+      return apt.sqft ?? null;
+    case "f-upfront":
+      return apt.upfrontCost ?? null;
+    case "f-utilities":
+      return apt.utilities ?? null;
+    case "f-parking-cost":
+      return apt.parkingCost ?? null;
   }
-  return v ?? null;
+
+  return explicit ?? null;
 }
 
-export function scoreApartment(apt: Apartment, factors: Factor[]): ScoreBreakdown {
-  const active = factors.filter((f) => f.weight > 0);
-  const totalWeight = active.reduce((s, f) => s + f.weight, 0);
+/**
+ * Compute apartment + per-bucket scores following the spec.
+ *
+ * Final score = Σ( bucket.weight × bucket.score ) / Σ( bucket.weight ),
+ * where bucket.score = Σ( factor.weight × factorScore ) / Σ( factor.weight that had a value ).
+ *
+ * Buckets with no scored factors are skipped from the final average so a missing
+ * data point doesn't drag the score to zero.
+ */
+export function scoreApartment(
+  apt: Apartment,
+  factors: Factor[],
+  buckets: Bucket[],
+  targetBudget: number,
+): ScoreBreakdown {
+  const contributions: FactorContribution[] = [];
+  const bucketBreakdowns: BucketBreakdown[] = [];
 
-  if (totalWeight === 0 || active.length === 0) {
-    return { total: 0, contributions: [], usedWeight: 0, hasMissing: false };
-  }
-
-  let weightedSum = 0;
-  let usedWeight = 0;
   let hasMissing = false;
-  const contributions: ScoreBreakdown["contributions"] = [];
+  let totalNumerator = 0;
+  let totalWeight = 0;
 
-  for (const f of active) {
-    const value = resolveValue(apt, f);
-    const normalized = normalizeFactor(f, value);
-    if (normalized === null) {
-      hasMissing = true;
-      contributions.push({ factorId: f.id, weighted: 0, normalized: null });
-      continue;
+  for (const bucket of buckets) {
+    const factorsForBucket = factors.filter((f) => f.bucketId === bucket.id && f.weight > 0);
+    let bucketWeightedSum = 0;
+    let bucketUsedWeight = 0;
+    let bucketTotalWeight = 0;
+    let bucketMissing = false;
+
+    for (const f of factorsForBucket) {
+      bucketTotalWeight += f.weight;
+
+      let raw: number | null;
+      if (f.type === "rent_vs_budget") {
+        const cost =
+          f.costMode === "true_cost" ? trueMonthlyCost(apt) : (apt.price ?? null);
+        raw = scoreRentVsBudget(cost, targetBudget);
+      } else {
+        const value = resolveValue(apt, f);
+        raw = scoreFactor(f, value);
+      }
+
+      if (raw === null) {
+        bucketMissing = true;
+        hasMissing = true;
+        contributions.push({ factorId: f.id, raw: null, weight: f.weight, bucketId: bucket.id });
+        continue;
+      }
+
+      bucketWeightedSum += f.weight * raw;
+      bucketUsedWeight += f.weight;
+      contributions.push({ factorId: f.id, raw, weight: f.weight, bucketId: bucket.id });
     }
-    const weighted = (f.weight / totalWeight) * normalized * 100;
-    weightedSum += weighted;
-    usedWeight += f.weight;
-    contributions.push({ factorId: f.id, weighted, normalized });
+
+    const bucketScore = bucketUsedWeight === 0 ? 0 : bucketWeightedSum / bucketUsedWeight;
+
+    bucketBreakdowns.push({
+      bucketId: bucket.id,
+      score: bucketScore,
+      usedWeight: bucketUsedWeight,
+      totalWeight: bucketTotalWeight,
+      hasMissing: bucketMissing,
+    });
+
+    // Only include buckets that actually have scored data + a bucket weight in the final.
+    if (bucket.weight > 0 && bucketUsedWeight > 0) {
+      totalNumerator += bucket.weight * bucketScore;
+      totalWeight += bucket.weight;
+    }
   }
 
-  // If some factors had missing values, rescale based on usedWeight so that an
-  // apartment with mostly-missing data isn't unfairly punished.
-  const total = usedWeight === 0 ? 0 : (weightedSum * totalWeight) / usedWeight;
+  const finalScore = totalWeight === 0 ? 0 : totalNumerator / totalWeight;
 
-  return { total: Math.round(total * 10) / 10, contributions, usedWeight, hasMissing };
+  return {
+    total: Math.round(finalScore),
+    buckets: bucketBreakdowns,
+    contributions,
+    hasMissing,
+  };
 }
 
 export function scoreColor(score: number) {
@@ -116,4 +217,10 @@ export function scoreBg(score: number) {
   if (score >= 50) return "bg-amber-500";
   if (score >= 35) return "bg-orange-500";
   return "bg-rose-500";
+}
+
+export function bucketLabel(id: BucketId): string {
+  if (id === "apartment") return "Apartment";
+  if (id === "location") return "Location";
+  return "Financial";
 }

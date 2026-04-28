@@ -20,7 +20,9 @@ type SortKey = "score" | "price-asc" | "price-desc" | "newest" | "title";
 
 export default function HomePage() {
   const apartments = useStore((s) => s.apartments);
+  const buckets = useStore((s) => s.buckets);
   const factors = useStore((s) => s.factors);
+  const targetBudget = useStore((s) => s.targetBudget);
   const exportJson = useStore((s) => s.exportJson);
   const importJson = useStore((s) => s.importJson);
 
@@ -31,7 +33,9 @@ export default function HomePage() {
     const list = [...apartments];
     if (sortBy === "score") {
       list.sort(
-        (a, b) => scoreApartment(b, factors).total - scoreApartment(a, factors).total,
+        (a, b) =>
+          scoreApartment(b, factors, buckets, targetBudget).total -
+          scoreApartment(a, factors, buckets, targetBudget).total,
       );
     } else if (sortBy === "price-asc") {
       list.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity));
@@ -43,7 +47,7 @@ export default function HomePage() {
       list.sort((a, b) => a.title.localeCompare(b.title));
     }
     return list;
-  }, [apartments, factors, sortBy]);
+  }, [apartments, buckets, factors, targetBudget, sortBy]);
 
   function downloadExport() {
     const payload = exportJson();
@@ -90,7 +94,7 @@ export default function HomePage() {
           <p className="text-muted-foreground">
             {apartments.length === 0
               ? "Add your first apartment to start scoring."
-              : `Tracking ${apartments.length} ${apartments.length === 1 ? "place" : "places"} across ${factors.length} factors.`}
+              : `Tracking ${apartments.length} ${apartments.length === 1 ? "place" : "places"} across ${buckets.length} buckets and ${factors.length} factors.`}
           </p>
         </div>
         <div className="flex items-center gap-2">

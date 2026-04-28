@@ -2,20 +2,26 @@
 
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import type { Apartment, ExportPayload, Factor } from "./types";
-import { DEFAULT_FACTORS } from "./default-factors";
+import type { Apartment, Bucket, BucketId, ExportPayload, Factor } from "./types";
+import { DEFAULT_BUCKETS, DEFAULT_FACTORS, DEFAULT_TARGET_BUDGET } from "./default-factors";
 import { uid } from "./utils";
 
 type State = {
+  buckets: Bucket[];
   factors: Factor[];
   apartments: Apartment[];
-  comparing: string[]; // apartment ids
-  openaiApiKey: string; // stored locally; sent only to /api/enrich on demand
+  comparing: string[];
+  targetBudget: number;
+  openaiApiKey: string;
   preferredModel: "gpt-5" | "gpt-5-mini" | "gpt-4o-mini";
   hydrated: boolean;
 };
 
 type Actions = {
+  // buckets
+  setBucketWeight: (id: BucketId, weight: number) => void;
+  resetBuckets: () => void;
+
   // factors
   addFactor: (f: Omit<Factor, "id">) => string;
   updateFactor: (id: string, patch: Partial<Factor>) => void;
@@ -23,9 +29,11 @@ type Actions = {
   resetFactors: () => void;
 
   // apartments
-  addApartment: (a: Omit<Apartment, "id" | "createdAt" | "updatedAt" | "values"> & {
-    values?: Apartment["values"];
-  }) => string;
+  addApartment: (
+    a: Omit<Apartment, "id" | "createdAt" | "updatedAt" | "values"> & {
+      values?: Apartment["values"];
+    },
+  ) => string;
   updateApartment: (id: string, patch: Partial<Apartment>) => void;
   setValue: (apartmentId: string, factorId: string, value: number | boolean | null) => void;
   removeApartment: (id: string) => void;
@@ -34,25 +42,36 @@ type Actions = {
   toggleCompare: (id: string) => void;
   clearCompare: () => void;
 
-  // ai settings
+  // settings
+  setTargetBudget: (n: number) => void;
   setOpenAiApiKey: (key: string) => void;
   setPreferredModel: (model: State["preferredModel"]) => void;
 
   // import / export
   exportJson: () => ExportPayload;
-  importJson: (payload: ExportPayload) => void;
+  importJson: (payload: ExportPayload | unknown) => void;
   reset: () => void;
 };
+
+const STORAGE_VERSION = 2;
 
 export const useStore = create<State & Actions>()(
   persist(
     (set, get) => ({
+      buckets: DEFAULT_BUCKETS,
       factors: DEFAULT_FACTORS,
       apartments: [],
       comparing: [],
+      targetBudget: DEFAULT_TARGET_BUDGET,
       openaiApiKey: "",
       preferredModel: "gpt-5",
       hydrated: false,
+
+      setBucketWeight: (id, weight) =>
+        set({
+          buckets: get().buckets.map((b) => (b.id === id ? { ...b, weight } : b)),
+        }),
+      resetBuckets: () => set({ buckets: DEFAULT_BUCKETS }),
 
       addFactor: (f) => {
         const id = `f-${uid()}`;
@@ -66,7 +85,6 @@ export const useStore = create<State & Actions>()(
       removeFactor: (id) =>
         set({
           factors: get().factors.filter((f) => f.id !== id),
-          // also clean up apartment values for this factor
           apartments: get().apartments.map((a) => {
             if (!(id in a.values)) return a;
             const next = { ...a.values };
@@ -115,46 +133,74 @@ export const useStore = create<State & Actions>()(
 
       toggleCompare: (id) => {
         const cur = get().comparing;
-        if (cur.includes(id)) {
-          set({ comparing: cur.filter((c) => c !== id) });
-        } else {
-          set({ comparing: [...cur, id] });
-        }
+        if (cur.includes(id)) set({ comparing: cur.filter((c) => c !== id) });
+        else set({ comparing: [...cur, id] });
       },
       clearCompare: () => set({ comparing: [] }),
 
+      setTargetBudget: (n) => set({ targetBudget: n }),
       setOpenAiApiKey: (key) => set({ openaiApiKey: key.trim() }),
       setPreferredModel: (model) => set({ preferredModel: model }),
 
       exportJson: () => ({
-        version: 1,
+        version: 2,
         exportedAt: Date.now(),
+        buckets: get().buckets,
         factors: get().factors,
         apartments: get().apartments,
+        targetBudget: get().targetBudget,
       }),
       importJson: (payload) => {
-        if (!payload || payload.version !== 1) {
-          throw new Error("Unsupported export file version");
+        const p = payload as Partial<ExportPayload>;
+        if (!p) throw new Error("Empty import");
+        if (p.version !== 2) {
+          throw new Error(
+            "Unsupported export version. Expected v2; v1 exports need to be re-created.",
+          );
         }
         set({
-          factors: payload.factors ?? DEFAULT_FACTORS,
-          apartments: payload.apartments ?? [],
+          buckets: p.buckets ?? DEFAULT_BUCKETS,
+          factors: p.factors ?? DEFAULT_FACTORS,
+          apartments: p.apartments ?? [],
+          targetBudget: p.targetBudget ?? DEFAULT_TARGET_BUDGET,
           comparing: [],
         });
       },
       reset: () =>
         set({
+          buckets: DEFAULT_BUCKETS,
           factors: DEFAULT_FACTORS,
           apartments: [],
           comparing: [],
+          targetBudget: DEFAULT_TARGET_BUDGET,
         }),
     }),
     {
-      name: "apartment-finder-v1",
+      name: "apartment-finder-v2",
+      version: STORAGE_VERSION,
       storage: createJSONStorage(() => localStorage),
+      // Anything stored under v1 (the old flat factor model) is incompatible — wipe and start fresh.
+      migrate: (persisted, version) => {
+        if (version < 2 || !persisted || typeof persisted !== "object") {
+          return {
+            buckets: DEFAULT_BUCKETS,
+            factors: DEFAULT_FACTORS,
+            apartments: [],
+            comparing: [],
+            targetBudget: DEFAULT_TARGET_BUDGET,
+            openaiApiKey:
+              ((persisted as Record<string, unknown> | null)?.openaiApiKey as string) ?? "",
+            preferredModel: "gpt-5",
+            hydrated: true,
+          };
+        }
+        return persisted as State;
+      },
       onRehydrateStorage: () => (state) => {
         if (state) state.hydrated = true;
       },
     },
   ),
 );
+
+export const ALL_BUCKET_IDS: BucketId[] = ["apartment", "location", "financial"];
