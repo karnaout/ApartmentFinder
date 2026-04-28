@@ -1,29 +1,51 @@
-import type { EnrichmentResult } from "../types";
+import type { EnrichmentResult, EnrichmentSuggestion } from "../types";
+
+export type PassId = "listing" | "apartment_financial" | "location";
 
 /**
- * NDJSON events emitted by /api/enrich while the agent loop runs.
+ * NDJSON events emitted by /api/enrich while the agent runs.
  * Each line of the response body is one of these.
+ *
+ * The flow is:
+ *   start
+ *   pass_start(listing)            iteration / web_search / thinking / tool_call / tool_result …
+ *   pass_complete(listing, partial)
+ *   pass_start(apartment_financial)  …
+ *   pass_complete(apartment_financial, partial)
+ *   pass_start(location)             …
+ *   pass_complete(location, partial)
+ *   complete(merged result)
  */
 export type AgentEvent =
-  | { type: "start"; model: string; hasUrl: boolean; factorCount: number }
-  | { type: "iteration"; n: number }
-  | { type: "thinking"; summary: string }
-  | { type: "web_search"; query: string }
+  | { type: "start"; model: string; hasUrl: boolean; factorCount: number; passes: PassId[] }
+  | { type: "pass_start"; pass: PassId; label: string; index: number; total: number }
+  | {
+      type: "pass_complete";
+      pass: PassId;
+      label: string;
+      suggestions: EnrichmentSuggestion[];
+      notes?: string;
+    }
+  | { type: "iteration"; pass?: PassId; n: number }
+  | { type: "thinking"; pass?: PassId; summary: string }
+  | { type: "web_search"; pass?: PassId; query: string }
   | {
       type: "tool_call";
+      pass?: PassId;
       name: string;
       call_id: string;
       args: Record<string, unknown>;
     }
   | {
       type: "tool_result";
+      pass?: PassId;
       name: string;
       call_id: string;
       ok: boolean;
       summary: string;
     }
   | { type: "complete"; result: EnrichmentResult }
-  | { type: "error"; message: string; raw?: string };
+  | { type: "error"; pass?: PassId; message: string; raw?: string };
 
 /**
  * Read an NDJSON stream from a fetch Response body and dispatch typed events.
@@ -56,7 +78,6 @@ export async function readAgentStream(
       }
     }
   }
-  // flush any final partial line
   const tail = buffer.trim();
   if (tail) {
     try {

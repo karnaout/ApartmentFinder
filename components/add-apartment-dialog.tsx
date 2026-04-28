@@ -77,6 +77,35 @@ const LINKED_FACTOR_IDS = new Set([
   "f-parking-cost",
 ]);
 
+const CONFIDENCE_RANK: Record<EnrichmentSuggestion["confidence"], number> = {
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+/** Merge a new batch of suggestions into the current list, keeping the
+ * higher-confidence entry when both passes return the same field. */
+function mergeSuggestions(
+  current: EnrichmentSuggestion[],
+  incoming: EnrichmentSuggestion[],
+): EnrichmentSuggestion[] {
+  const byField = new Map<string, EnrichmentSuggestion>();
+  for (const s of current) byField.set(s.field, s);
+  for (const s of incoming) {
+    const existing = byField.get(s.field);
+    if (!existing) {
+      byField.set(s.field, s);
+      continue;
+    }
+    const existingScore =
+      (existing.value != null ? 10 : 0) + CONFIDENCE_RANK[existing.confidence];
+    const incomingScore =
+      (s.value != null ? 10 : 0) + CONFIDENCE_RANK[s.confidence];
+    if (incomingScore > existingScore) byField.set(s.field, s);
+  }
+  return Array.from(byField.values());
+}
+
 export function AddApartmentDialog({
   open,
   onOpenChange,
@@ -128,7 +157,16 @@ export function AddApartmentDialog({
 
   const detected = detectSource(url);
 
-  async function handleImport() {
+  /**
+   * Best-path "add from URL" flow:
+   *  - If AI is available, jump straight to the review screen with just
+   *    { url, source } and let the AI agent fetch + web-search the rest.
+   *    The agent already has our scraper as a tool, so we don't lose
+   *    structured data; we just stop blocking the UI on it.
+   *  - If AI isn't available, fall back to the scrape-only path. If the
+   *    listing site blocks us we surface "continue manually".
+   */
+  async function addFromUrl() {
     setImportError(null);
     setImportBlocked(false);
     if (!url.trim()) {
@@ -141,6 +179,16 @@ export function AddApartmentDialog({
       );
       return;
     }
+
+    if (hasAiKey) {
+      const next: Draft = { ...empty, url, source: detected, title: "" };
+      setDraft(next);
+      setStep("review");
+      runEnrichment(next);
+      return;
+    }
+
+    // No AI: best-effort scrape fallback.
     setImporting(true);
     try {
       const res = await fetch("/api/import", {
@@ -158,7 +206,7 @@ export function AddApartmentDialog({
           setImportBlocked(true);
           setImportError(
             data.error ||
-              "The listing site blocked our request. You can continue manually with the URL preserved — AI enrichment can still pull details from the web.",
+              "The listing site blocked our request. Continue manually, or add an OpenAI API key for AI auto-fill.",
           );
         } else {
           setImportError(data.error || `Import failed (${res.status})`);
@@ -197,19 +245,9 @@ export function AddApartmentDialog({
     }
   }
 
-  /**
-   * Skip the failed scrape but keep the URL we already have so the user
-   * can immediately edit fields and / or kick off AI enrichment, which
-   * has its own access path (web_search) that doesn't depend on Zillow's
-   * anti-bot rules.
-   */
+  /** Used by the "continue manually" fallback when scrape is blocked AND there's no AI key. */
   function continueWithUrl() {
-    setDraft({
-      ...empty,
-      url,
-      source: detected ?? "manual",
-      title: "",
-    });
+    setDraft({ ...empty, url, source: detected ?? "manual", title: "" });
     setStep("review");
   }
 
@@ -219,7 +257,11 @@ export function AddApartmentDialog({
     setTab("manual");
   }
 
-  async function enrichWithAi() {
+  /**
+   * Internal worker — accepts an explicit draft so it can be invoked
+   * synchronously after a setDraft() without waiting for re-render.
+   */
+  async function runEnrichment(d: Draft) {
     setEnrichError(null);
     if (!hasAiKey) {
       setEnrichError(
@@ -236,8 +278,8 @@ export function AddApartmentDialog({
         body: JSON.stringify({
           apiKey: openaiApiKey,
           model: preferredModel,
-          url: draft.url,
-          draft,
+          url: d.url,
+          draft: d,
           factors,
           buckets,
           targetBudget,
@@ -250,32 +292,55 @@ export function AddApartmentDialog({
 
       let result: EnrichmentResult | null = null;
       let errored = false;
+      let lastErrorMessage: string | null = null;
+      // Stream suggestions in as each pass completes so the user sees the
+      // form populate in waves (listing facts first, then amenity factors,
+      // then location). We dedupe by field — the final `complete` event
+      // does the same on the server side as a safety net.
+      setSuggestions([]);
       await readAgentStream(res, (event) => {
         setAgentEvents((cur) => [...cur, event]);
-        if (event.type === "complete") {
+        if (event.type === "pass_complete") {
+          if (event.suggestions.length > 0) {
+            setSuggestions((cur) => mergeSuggestions(cur, event.suggestions));
+          }
+          if (event.notes) {
+            setAiNotes((prev) => (prev ? `${prev} • ${event.notes}` : event.notes ?? null));
+          }
+        } else if (event.type === "complete") {
           result = event.result;
         } else if (event.type === "error") {
-          errored = true;
-          setEnrichError(event.message);
+          // Per-pass errors are soft; only treat the run as failed if the
+          // server never produced a final `complete`.
+          lastErrorMessage = event.message;
+          if (!event.pass) {
+            errored = true;
+            setEnrichError(event.message);
+          }
         }
       });
 
       if (errored) return;
       if (!result) {
-        throw new Error("Stream ended without a result.");
+        throw new Error(lastErrorMessage || "Stream ended without a result.");
       }
       const finalResult: EnrichmentResult = result;
       setSuggestions(finalResult.suggestions ?? []);
       setAiNotes(finalResult.notes ?? null);
       toast({
         title: "AI suggestions ready",
-        description: `${finalResult.suggestions?.length ?? 0} fields evaluated. Review and accept individually.`,
+        description: `${finalResult.suggestions?.length ?? 0} fields evaluated. Review and accept.`,
       });
     } catch (e) {
       setEnrichError(e instanceof Error ? e.message : "Enrichment failed");
     } finally {
       setEnriching(false);
     }
+  }
+
+  /** Re-run AI enrichment from the review form (passes the latest draft). */
+  function enrichWithAi() {
+    return runEnrichment(draft);
   }
 
   function applyToDraft(d: Draft, s: EnrichmentSuggestion, factorList: Factor[]): Draft {
@@ -371,6 +436,11 @@ export function AddApartmentDialog({
                     placeholder="https://www.zillow.com/homedetails/..."
                     className="pl-9"
                     autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && url && detected && !importing) {
+                        addFromUrl();
+                      }
+                    }}
                   />
                 </div>
                 <div className="flex items-center justify-between text-xs">
@@ -410,9 +480,6 @@ export function AddApartmentDialog({
                         >
                           Continue manually
                         </Button>
-                        <span className="text-[11px] text-muted-foreground">
-                          We&apos;ll keep the URL — AI enrichment can still pull details from the web.
-                        </span>
                       </div>
                     )}
                   </div>
@@ -420,22 +487,40 @@ export function AddApartmentDialog({
               </div>
 
               <Button
-                onClick={handleImport}
+                onClick={addFromUrl}
                 disabled={importing || !url}
                 className="w-full"
               >
                 {importing ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    Importing…
+                    {hasAiKey ? "Starting AI…" : "Importing…"}
                   </>
                 ) : (
                   <>
                     <Sparkles className="h-4 w-4" />
-                    Auto-fill from link
+                    {hasAiKey
+                      ? "Add with AI — fetch & fill everything"
+                      : "Auto-fill from link"}
                   </>
                 )}
               </Button>
+
+              <p className="text-[11px] text-muted-foreground text-center">
+                {hasAiKey ? (
+                  <>
+                    The AI agent will fetch the listing, search the web for
+                    walkability, fees, neighborhood data, and rate every factor.
+                    You&apos;ll review before saving.
+                  </>
+                ) : (
+                  <>
+                    No AI key configured. Add{" "}
+                    <code className="bg-muted px-1 py-0.5 rounded">OPENAI_API_KEY</code>{" "}
+                    to <code className="bg-muted px-1 py-0.5 rounded">.env.local</code> for full auto-fill.
+                  </>
+                )}
+              </p>
             </TabsContent>
 
             <TabsContent value="manual">
