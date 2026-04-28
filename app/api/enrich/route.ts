@@ -3,6 +3,7 @@ import type { Apartment, Bucket, EnrichmentResult, Factor } from "@/lib/types";
 import { buildEnrichmentPrompt, extractJson } from "@/lib/enrich/prompt";
 import type { AgentEvent } from "@/lib/enrich/events";
 import { detectSource, importListing } from "@/lib/scrape";
+import { FetchBlockedError } from "@/lib/scrape/fetch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,7 +36,7 @@ export async function POST(req: Request) {
   }
 
   const {
-    apiKey,
+    apiKey: clientApiKey,
     model = "gpt-5",
     url,
     draft = {},
@@ -43,9 +44,14 @@ export async function POST(req: Request) {
     buckets = [],
     targetBudget,
   } = body;
+
+  // Prefer the server-side env var; fall back to a key the user pasted
+  // into Settings (kept in localStorage). This way personal deployments
+  // can just set OPENAI_API_KEY and skip the UI flow entirely.
+  const apiKey = process.env.OPENAI_API_KEY?.trim() || clientApiKey?.trim();
   if (!apiKey) {
     return jsonError(
-      "Missing OpenAI API key. Add it in Settings → AI to enable enrichment.",
+      "No OpenAI API key found. Set OPENAI_API_KEY in .env.local or paste a key in Settings → AI.",
       400,
     );
   }
@@ -194,8 +200,18 @@ export async function POST(req: Request) {
               }
             } catch (e) {
               ok = false;
-              result = { error: e instanceof Error ? e.message : String(e) };
-              summary = (result as { error: string }).error;
+              if (e instanceof FetchBlockedError) {
+                result = {
+                  error: e.message,
+                  blocked: true,
+                  status: e.status,
+                  hint: "Fall back to web_search. Try queries like the listing's address, the building name, or 'site:zillow.com <address>' — Google's snippets often expose price/beds/baths even when the listing page itself blocks scrapers.",
+                };
+                summary = `${e.status} blocked — falling back to web search`;
+              } else {
+                result = { error: e instanceof Error ? e.message : String(e) };
+                summary = (result as { error: string }).error;
+              }
             }
 
             send({

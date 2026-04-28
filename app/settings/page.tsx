@@ -18,6 +18,7 @@ import { useStore } from "@/lib/store";
 import type { BucketId, Factor, FactorType } from "@/lib/types";
 import { toast } from "@/components/ui/toaster";
 import { cn, formatCurrency } from "@/lib/utils";
+import { useAiStatus } from "@/lib/use-ai-status";
 
 export default function SettingsPage() {
   const buckets = useStore((s) => s.buckets);
@@ -37,6 +38,7 @@ export default function SettingsPage() {
 
   const [keyDraft, setKeyDraft] = React.useState(openaiApiKey);
   const [showKey, setShowKey] = React.useState(false);
+  const aiStatus = useAiStatus();
   const [budgetDraft, setBudgetDraft] = React.useState(String(targetBudget));
 
   const totalBucketWeight = buckets.reduce((s, b) => s + b.weight, 0);
@@ -183,40 +185,76 @@ export default function SettingsPage() {
           <div className="flex-1 min-w-0">
             <h2 className="text-base font-semibold">AI enrichment</h2>
             <p className="text-sm text-muted-foreground">
-              Add an OpenAI API key to enable the &ldquo;Enrich with AI&rdquo;
-              button when adding apartments. Your key is stored only in this
-              browser&apos;s local storage and is sent only to OpenAI through
-              this app&apos;s server (never logged).
+              {aiStatus.serverKey ? (
+                <>
+                  Using <code className="text-xs bg-muted px-1 py-0.5 rounded">OPENAI_API_KEY</code>{" "}
+                  from your server environment. Pick a model below — no UI key needed.
+                </>
+              ) : (
+                <>
+                  Set <code className="text-xs bg-muted px-1 py-0.5 rounded">OPENAI_API_KEY</code>{" "}
+                  in <code className="text-xs bg-muted px-1 py-0.5 rounded">.env.local</code> (recommended) or paste a key here. Keys pasted here live only in this browser&apos;s local storage.
+                </>
+              )}
             </p>
           </div>
+          <span className="text-xs text-muted-foreground shrink-0 mt-1">
+            {aiStatus.serverKey ? (
+              <>
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 mr-1.5 align-middle" />
+                Server key
+              </>
+            ) : openaiApiKey ? (
+              <>
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 mr-1.5 align-middle" />
+                Browser key
+              </>
+            ) : (
+              <>
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-muted-foreground mr-1.5 align-middle" />
+                Disabled
+              </>
+            )}
+          </span>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 sm:grid-cols-[1fr_180px] gap-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="openai-key" className="text-xs">
-              OpenAI API key
-            </Label>
-            <div className="relative">
-              <Input
-                id="openai-key"
-                type={showKey ? "text" : "password"}
-                value={keyDraft}
-                onChange={(e) => setKeyDraft(e.target.value)}
-                placeholder="sk-…"
-                autoComplete="off"
-                spellCheck={false}
-                className="pr-9 font-mono text-xs"
-              />
-              <button
-                type="button"
-                onClick={() => setShowKey((s) => !s)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                title={showKey ? "Hide" : "Show"}
-              >
-                {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-              </button>
+        <div
+          className={cn(
+            "mt-5 grid grid-cols-1 gap-3",
+            !aiStatus.serverKey && "sm:grid-cols-[1fr_180px]",
+          )}
+        >
+          {!aiStatus.serverKey && (
+            <div className="space-y-1.5">
+              <Label htmlFor="openai-key" className="text-xs">
+                OpenAI API key (browser-local fallback)
+              </Label>
+              <div className="relative">
+                <Input
+                  id="openai-key"
+                  type={showKey ? "text" : "password"}
+                  value={keyDraft}
+                  onChange={(e) => setKeyDraft(e.target.value)}
+                  placeholder="sk-…"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="pr-9 font-mono text-xs"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowKey((s) => !s)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  title={showKey ? "Hide" : "Show"}
+                >
+                  {showKey ? (
+                    <EyeOff className="h-3.5 w-3.5" />
+                  ) : (
+                    <Eye className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
           <div className="space-y-1.5">
             <Label className="text-xs">Model</Label>
             <Select
@@ -235,50 +273,39 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 mt-3">
-          <Button
-            size="sm"
-            onClick={() => {
-              setOpenAiApiKey(keyDraft);
-              toast({
-                title: keyDraft ? "API key saved" : "API key cleared",
-                description: keyDraft
-                  ? "AI enrichment is enabled."
-                  : "AI enrichment is now disabled.",
-              });
-            }}
-            disabled={keyDraft === openaiApiKey}
-          >
-            Save
-          </Button>
-          {openaiApiKey && (
+        {!aiStatus.serverKey && (
+          <div className="flex items-center gap-2 mt-3">
             <Button
               size="sm"
-              variant="ghost"
               onClick={() => {
-                setOpenAiApiKey("");
-                setKeyDraft("");
-                toast({ title: "API key cleared" });
+                setOpenAiApiKey(keyDraft);
+                toast({
+                  title: keyDraft ? "API key saved" : "API key cleared",
+                  description: keyDraft
+                    ? "AI enrichment is enabled."
+                    : "AI enrichment is now disabled.",
+                });
               }}
-              className="text-muted-foreground"
+              disabled={keyDraft === openaiApiKey}
             >
-              Clear
+              Save
             </Button>
-          )}
-          <span className="ml-auto text-xs text-muted-foreground">
-            {openaiApiKey ? (
-              <>
-                <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 mr-1.5 align-middle" />
-                Enabled
-              </>
-            ) : (
-              <>
-                <span className="inline-block h-1.5 w-1.5 rounded-full bg-muted-foreground mr-1.5 align-middle" />
-                Disabled
-              </>
+            {openaiApiKey && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setOpenAiApiKey("");
+                  setKeyDraft("");
+                  toast({ title: "API key cleared" });
+                }}
+                className="text-muted-foreground"
+              >
+                Clear
+              </Button>
             )}
-          </span>
-        </div>
+          </div>
+        )}
       </Card>
 
       {/* Factors grouped by bucket */}

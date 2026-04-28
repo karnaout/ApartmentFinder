@@ -43,6 +43,7 @@ import type {
 } from "@/lib/types";
 import type { AgentEvent } from "@/lib/enrich/events";
 import { readAgentStream } from "@/lib/enrich/events";
+import { useAiStatus } from "@/lib/use-ai-status";
 
 const BASIC_TEXT_FIELDS = new Set([
   "title",
@@ -90,6 +91,8 @@ export default function ApartmentDetailPage() {
   const removeApartment = useStore((s) => s.removeApartment);
   const openaiApiKey = useStore((s) => s.openaiApiKey);
   const preferredModel = useStore((s) => s.preferredModel);
+  const aiStatus = useAiStatus();
+  const hasAiKey = aiStatus.serverKey || !!openaiApiKey;
 
   const [enriching, setEnriching] = React.useState(false);
   const [enrichError, setEnrichError] = React.useState<string | null>(null);
@@ -106,8 +109,10 @@ export default function ApartmentDetailPage() {
 
   async function enrich() {
     if (!apartment) return;
-    if (!openaiApiKey) {
-      setEnrichError("Add an OpenAI API key in Settings → AI to enable enrichment.");
+    if (!hasAiKey) {
+      setEnrichError(
+        "No OpenAI API key configured. Set OPENAI_API_KEY in .env.local or paste a key in Settings → AI.",
+      );
       return;
     }
     setEnrichError(null);
@@ -365,7 +370,7 @@ export default function ApartmentDetailPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {openaiApiKey ? (
+            {hasAiKey ? (
               <Button size="sm" onClick={enrich} disabled={enriching}>
                 {enriching ? (
                   <>

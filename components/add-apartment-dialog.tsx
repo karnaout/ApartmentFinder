@@ -36,6 +36,7 @@ import type { AgentEvent } from "@/lib/enrich/events";
 import { readAgentStream } from "@/lib/enrich/events";
 import { toast } from "@/components/ui/toaster";
 import { cn, formatCurrency } from "@/lib/utils";
+import { useAiStatus } from "@/lib/use-ai-status";
 
 type Draft = Omit<Apartment, "id" | "createdAt" | "updatedAt">;
 
@@ -89,11 +90,14 @@ export function AddApartmentDialog({
   const addApartment = useStore((s) => s.addApartment);
   const openaiApiKey = useStore((s) => s.openaiApiKey);
   const preferredModel = useStore((s) => s.preferredModel);
+  const aiStatus = useAiStatus();
+  const hasAiKey = aiStatus.serverKey || !!openaiApiKey;
 
   const [tab, setTab] = React.useState<"url" | "manual">("url");
   const [url, setUrl] = React.useState("");
   const [importing, setImporting] = React.useState(false);
   const [importError, setImportError] = React.useState<string | null>(null);
+  const [importBlocked, setImportBlocked] = React.useState(false);
   const [draft, setDraft] = React.useState<Draft>(empty);
   const [step, setStep] = React.useState<"input" | "review">("input");
 
@@ -109,6 +113,7 @@ export function AddApartmentDialog({
         setUrl("");
         setDraft(empty);
         setImportError(null);
+        setImportBlocked(false);
         setStep("input");
         setTab("url");
         setSuggestions([]);
@@ -125,6 +130,7 @@ export function AddApartmentDialog({
 
   async function handleImport() {
     setImportError(null);
+    setImportBlocked(false);
     if (!url.trim()) {
       setImportError("Paste a Zillow or Apartments.com URL.");
       return;
@@ -142,9 +148,22 @@ export function AddApartmentDialog({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ url }),
       });
-      const data = (await res.json()) as { listing?: ImportedListing; error?: string };
+      const data = (await res.json()) as {
+        listing?: ImportedListing;
+        error?: string;
+        blocked?: boolean;
+      };
       if (!res.ok || !data.listing) {
-        throw new Error(data.error || `Import failed (${res.status})`);
+        if (data.blocked) {
+          setImportBlocked(true);
+          setImportError(
+            data.error ||
+              "The listing site blocked our request. You can continue manually with the URL preserved — AI enrichment can still pull details from the web.",
+          );
+        } else {
+          setImportError(data.error || `Import failed (${res.status})`);
+        }
+        return;
       }
       const l = data.listing;
       setDraft({
@@ -178,6 +197,22 @@ export function AddApartmentDialog({
     }
   }
 
+  /**
+   * Skip the failed scrape but keep the URL we already have so the user
+   * can immediately edit fields and / or kick off AI enrichment, which
+   * has its own access path (web_search) that doesn't depend on Zillow's
+   * anti-bot rules.
+   */
+  function continueWithUrl() {
+    setDraft({
+      ...empty,
+      url,
+      source: detected ?? "manual",
+      title: "",
+    });
+    setStep("review");
+  }
+
   function startManual() {
     setDraft({ ...empty, source: "manual", title: "" });
     setStep("review");
@@ -186,9 +221,9 @@ export function AddApartmentDialog({
 
   async function enrichWithAi() {
     setEnrichError(null);
-    if (!openaiApiKey) {
+    if (!hasAiKey) {
       setEnrichError(
-        "Add an OpenAI API key in Settings → AI before using enrichment.",
+        "No OpenAI API key configured. Set OPENAI_API_KEY in .env.local or paste a key in Settings → AI.",
       );
       return;
     }
@@ -354,9 +389,32 @@ export function AddApartmentDialog({
                   )}
                 </div>
                 {importError && (
-                  <div className="flex gap-2 text-xs text-destructive bg-destructive/5 border border-destructive/20 rounded-md p-2">
-                    <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                    <span>{importError}</span>
+                  <div
+                    className={cn(
+                      "flex flex-col gap-2 text-xs rounded-md p-2 border",
+                      importBlocked
+                        ? "text-amber-700 dark:text-amber-300 bg-amber-500/10 border-amber-500/30"
+                        : "text-destructive bg-destructive/5 border-destructive/20",
+                    )}
+                  >
+                    <div className="flex gap-2">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                      <span>{importError}</span>
+                    </div>
+                    {importBlocked && (
+                      <div className="flex flex-wrap items-center gap-2 pl-5">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={continueWithUrl}
+                        >
+                          Continue manually
+                        </Button>
+                        <span className="text-[11px] text-muted-foreground">
+                          We&apos;ll keep the URL — AI enrichment can still pull details from the web.
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -402,7 +460,7 @@ export function AddApartmentDialog({
             enriching={enriching}
             enrichError={enrichError}
             aiNotes={aiNotes}
-            hasApiKey={!!openaiApiKey}
+            hasApiKey={hasAiKey}
             agentEvents={agentEvents}
           />
         )}
