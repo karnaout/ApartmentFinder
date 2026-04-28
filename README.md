@@ -8,6 +8,10 @@ and let the weighted score do the rest.
 
 - **Link import** — paste a Zillow or Apartments.com URL, the app pulls address,
   rent, beds/baths/sqft, and a hero image automatically.
+- **AI enrichment** *(optional, BYO OpenAI key)* — one click and GPT-5 will
+  search the web to fill in missing data: walkability, commute, school quality,
+  neighborhood vibe, your custom factors, anything. Suggestions come with
+  confidence levels and source links so you stay in control.
 - **Custom factors** — fully customizable list of factors with type
   (number / 1–10 rating / yes-no), direction (higher or lower is better),
   weight, and value range. Defaults included.
@@ -61,6 +65,21 @@ headers, then:
 Both sites have anti-bot defenses; a small fraction of pages may not parse
 cleanly. In that case the dialog falls through to the manual form so nothing
 is lost.
+
+## AI enrichment (optional)
+
+- Open **Factors** in the header → paste your OpenAI API key into the **AI
+  enrichment** card. Pick a model (default `gpt-5`).
+- Add or edit an apartment, then click **✨ Enrich with AI**. The server route
+  at `/api/enrich` calls the OpenAI **Responses API** with the built-in
+  `web_search` tool and asks the model to return a JSON list of suggested
+  values, each with a confidence level and source URL.
+- Suggestions appear inline next to every field. Click **Use** to accept,
+  **×** to dismiss. **Accept N high-confidence** bulk-accepts everything
+  marked `high` or `medium`.
+- Your API key is kept in browser localStorage only. The server route uses it
+  for the single request and never logs it. If you'd rather not BYO, set
+  `OPENAI_API_KEY` server-side and remove the client check.
 
 ## Data export / import
 

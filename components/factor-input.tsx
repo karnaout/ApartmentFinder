@@ -5,7 +5,8 @@ import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import type { Factor } from "@/lib/types";
+import type { EnrichmentSuggestion, Factor } from "@/lib/types";
+import { SuggestionBadge } from "@/components/suggestion-badge";
 import { cn } from "@/lib/utils";
 
 type Value = number | boolean | null | undefined;
@@ -15,16 +16,35 @@ export function FactorInput({
   value,
   onChange,
   className,
+  suggestion,
+  onAcceptSuggestion,
+  onDismissSuggestion,
 }: {
   factor: Factor;
   value: Value;
   onChange: (v: number | boolean | null) => void;
   className?: string;
+  suggestion?: EnrichmentSuggestion;
+  onAcceptSuggestion?: () => void;
+  onDismissSuggestion?: () => void;
 }) {
+  const hint =
+    suggestion && onAcceptSuggestion && onDismissSuggestion ? (
+      <SuggestionBadge
+        suggestion={suggestion}
+        onAccept={onAcceptSuggestion}
+        onDismiss={onDismissSuggestion}
+        compact
+      />
+    ) : null;
+
   if (factor.type === "boolean") {
     return (
       <div className={cn("flex items-center justify-between gap-3", className)}>
-        <Label className="font-normal">{factor.name}</Label>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Label className="font-normal">{factor.name}</Label>
+          {hint}
+        </div>
         <Switch
           checked={!!value}
           onCheckedChange={(c) => onChange(c)}
@@ -39,16 +59,19 @@ export function FactorInput({
     const numeric = typeof value === "number" ? value : null;
     return (
       <div className={cn("space-y-2", className)}>
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
           <Label className="font-normal">
             {factor.name}{" "}
             <span className="text-xs text-muted-foreground">
               ({min}–{max})
             </span>
           </Label>
-          <span className="text-sm font-semibold tabular-nums w-10 text-right">
-            {numeric ?? "—"}
-          </span>
+          <div className="flex items-center gap-2">
+            {hint}
+            <span className="text-sm font-semibold tabular-nums w-10 text-right">
+              {numeric ?? "—"}
+            </span>
+          </div>
         </div>
         <Slider
           min={min}
@@ -61,15 +84,17 @@ export function FactorInput({
     );
   }
 
-  // number
   return (
     <div className={cn("space-y-1.5", className)}>
-      <Label className="font-normal">
-        {factor.name}
-        {factor.unit && (
-          <span className="text-xs text-muted-foreground ml-1">({factor.unit})</span>
-        )}
-      </Label>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <Label className="font-normal">
+          {factor.name}
+          {factor.unit && (
+            <span className="text-xs text-muted-foreground ml-1">({factor.unit})</span>
+          )}
+        </Label>
+        {hint}
+      </div>
       <Input
         type="number"
         inputMode="decimal"

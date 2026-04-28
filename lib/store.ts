@@ -10,6 +10,8 @@ type State = {
   factors: Factor[];
   apartments: Apartment[];
   comparing: string[]; // apartment ids
+  openaiApiKey: string; // stored locally; sent only to /api/enrich on demand
+  preferredModel: "gpt-5" | "gpt-5-mini" | "gpt-4o-mini";
   hydrated: boolean;
 };
 
@@ -32,6 +34,10 @@ type Actions = {
   toggleCompare: (id: string) => void;
   clearCompare: () => void;
 
+  // ai settings
+  setOpenAiApiKey: (key: string) => void;
+  setPreferredModel: (model: State["preferredModel"]) => void;
+
   // import / export
   exportJson: () => ExportPayload;
   importJson: (payload: ExportPayload) => void;
@@ -44,6 +50,8 @@ export const useStore = create<State & Actions>()(
       factors: DEFAULT_FACTORS,
       apartments: [],
       comparing: [],
+      openaiApiKey: "",
+      preferredModel: "gpt-5",
       hydrated: false,
 
       addFactor: (f) => {
@@ -114,6 +122,9 @@ export const useStore = create<State & Actions>()(
         }
       },
       clearCompare: () => set({ comparing: [] }),
+
+      setOpenAiApiKey: (key) => set({ openaiApiKey: key.trim() }),
+      setPreferredModel: (model) => set({ preferredModel: model }),
 
       exportJson: () => ({
         version: 1,

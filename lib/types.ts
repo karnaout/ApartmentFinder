@@ -70,3 +70,28 @@ export type ExportPayload = {
   factors: Factor[];
   apartments: Apartment[];
 };
+
+export type Confidence = "low" | "medium" | "high";
+
+/** A single AI-suggested value for a field. */
+export type EnrichmentSuggestion = {
+  /**
+   * Field identifier:
+   *  - Built-in basics: "title" | "address" | "city" | "state" | "zip" | "price" | "bedrooms" | "bathrooms" | "sqft" | "imageUrl"
+   *  - Custom factor: the factor's id (e.g. "f-natural-light")
+   */
+  field: string;
+  /** The suggested value, type depends on field. */
+  value: number | boolean | string | null;
+  confidence: Confidence;
+  /** Source URL, or "listing" if pulled from the original listing page. */
+  source?: string;
+  reasoning?: string;
+};
+
+export type EnrichmentResult = {
+  suggestions: EnrichmentSuggestion[];
+  notes?: string;
+  /** Best-effort cost / usage hint from the model. */
+  usage?: { inputTokens?: number; outputTokens?: number };
+};
