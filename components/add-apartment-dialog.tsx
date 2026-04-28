@@ -27,6 +27,9 @@ import type {
 import { detectSource } from "@/lib/scrape";
 import { FactorInput } from "@/components/factor-input";
 import { SuggestionBadge } from "@/components/suggestion-badge";
+import { AgentProgress } from "@/components/agent-progress";
+import type { AgentEvent } from "@/lib/enrich/events";
+import { readAgentStream } from "@/lib/enrich/events";
 import { toast } from "@/components/ui/toaster";
 import { cn } from "@/lib/utils";
 
@@ -73,6 +76,7 @@ export function AddApartmentDialog({
   const [enrichError, setEnrichError] = React.useState<string | null>(null);
   const [suggestions, setSuggestions] = React.useState<EnrichmentSuggestion[]>([]);
   const [aiNotes, setAiNotes] = React.useState<string | null>(null);
+  const [agentEvents, setAgentEvents] = React.useState<AgentEvent[]>([]);
 
   const handleOpenChange = React.useCallback(
     (next: boolean) => {
@@ -85,6 +89,7 @@ export function AddApartmentDialog({
         setSuggestions([]);
         setEnrichError(null);
         setAiNotes(null);
+        setAgentEvents([]);
       }
       onOpenChange(next);
     },
@@ -163,6 +168,7 @@ export function AddApartmentDialog({
       return;
     }
     setEnriching(true);
+    setAgentEvents([]);
     try {
       const res = await fetch("/api/enrich", {
         method: "POST",
@@ -175,15 +181,33 @@ export function AddApartmentDialog({
           factors,
         }),
       });
-      const data = (await res.json()) as EnrichmentResult & { error?: string };
-      if (!res.ok || data.error) {
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `Enrichment failed (${res.status})`);
       }
-      setSuggestions(data.suggestions ?? []);
-      setAiNotes(data.notes ?? null);
+
+      let result: EnrichmentResult | null = null;
+      let errored = false;
+      await readAgentStream(res, (event) => {
+        setAgentEvents((cur) => [...cur, event]);
+        if (event.type === "complete") {
+          result = event.result;
+        } else if (event.type === "error") {
+          errored = true;
+          setEnrichError(event.message);
+        }
+      });
+
+      if (errored) return;
+      if (!result) {
+        throw new Error("Stream ended without a result.");
+      }
+      const finalResult: EnrichmentResult = result;
+      setSuggestions(finalResult.suggestions ?? []);
+      setAiNotes(finalResult.notes ?? null);
       toast({
         title: "AI suggestions ready",
-        description: `${data.suggestions?.length ?? 0} fields evaluated. Review and accept individually.`,
+        description: `${finalResult.suggestions?.length ?? 0} fields evaluated. Review and accept individually.`,
       });
     } catch (e) {
       setEnrichError(e instanceof Error ? e.message : "Enrichment failed");
@@ -356,6 +380,7 @@ export function AddApartmentDialog({
             enrichError={enrichError}
             aiNotes={aiNotes}
             hasApiKey={!!openaiApiKey}
+            agentEvents={agentEvents}
           />
         )}
 
@@ -387,6 +412,7 @@ function ReviewForm({
   enrichError,
   aiNotes,
   hasApiKey,
+  agentEvents,
 }: {
   draft: Draft;
   setDraft: React.Dispatch<React.SetStateAction<Draft>>;
@@ -400,6 +426,7 @@ function ReviewForm({
   enrichError: string | null;
   aiNotes: string | null;
   hasApiKey: boolean;
+  agentEvents: AgentEvent[];
 }) {
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }));
@@ -477,6 +504,7 @@ function ReviewForm({
             <span>{enrichError}</span>
           </div>
         )}
+        <AgentProgress events={agentEvents} active={enriching} />
         {aiNotes && (
           <p className="text-xs text-muted-foreground italic">
             <span className="font-medium not-italic">AI notes: </span>

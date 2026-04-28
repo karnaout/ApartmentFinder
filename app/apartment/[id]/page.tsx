@@ -21,10 +21,13 @@ import { Card } from "@/components/ui/card";
 import { ScoreBadge } from "@/components/score-badge";
 import { FactorInput } from "@/components/factor-input";
 import { SuggestionBadge } from "@/components/suggestion-badge";
+import { AgentProgress } from "@/components/agent-progress";
 import { scoreApartment, scoreBg } from "@/lib/scoring";
 import { cn, formatCurrency } from "@/lib/utils";
 import { toast } from "@/components/ui/toaster";
 import type { EnrichmentResult, EnrichmentSuggestion } from "@/lib/types";
+import type { AgentEvent } from "@/lib/enrich/events";
+import { readAgentStream } from "@/lib/enrich/events";
 
 export default function ApartmentDetailPage() {
   const params = useParams<{ id: string }>();
@@ -43,6 +46,7 @@ export default function ApartmentDetailPage() {
   const [enrichError, setEnrichError] = React.useState<string | null>(null);
   const [suggestions, setSuggestions] = React.useState<EnrichmentSuggestion[]>([]);
   const [aiNotes, setAiNotes] = React.useState<string | null>(null);
+  const [agentEvents, setAgentEvents] = React.useState<AgentEvent[]>([]);
 
   const suggestionsByField = React.useMemo(() => {
     const m = new Map<string, EnrichmentSuggestion>();
@@ -58,6 +62,7 @@ export default function ApartmentDetailPage() {
     }
     setEnrichError(null);
     setEnriching(true);
+    setAgentEvents([]);
     try {
       const res = await fetch("/api/enrich", {
         method: "POST",
@@ -70,15 +75,31 @@ export default function ApartmentDetailPage() {
           factors,
         }),
       });
-      const data = (await res.json()) as EnrichmentResult & { error?: string };
-      if (!res.ok || data.error) {
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `Enrichment failed (${res.status})`);
       }
-      setSuggestions(data.suggestions ?? []);
-      setAiNotes(data.notes ?? null);
+
+      let result: EnrichmentResult | null = null;
+      let errored = false;
+      await readAgentStream(res, (event) => {
+        setAgentEvents((cur) => [...cur, event]);
+        if (event.type === "complete") {
+          result = event.result;
+        } else if (event.type === "error") {
+          errored = true;
+          setEnrichError(event.message);
+        }
+      });
+
+      if (errored) return;
+      if (!result) throw new Error("Stream ended without a result.");
+      const finalResult: EnrichmentResult = result;
+      setSuggestions(finalResult.suggestions ?? []);
+      setAiNotes(finalResult.notes ?? null);
       toast({
         title: "AI suggestions ready",
-        description: `${data.suggestions?.length ?? 0} fields evaluated.`,
+        description: `${finalResult.suggestions?.length ?? 0} fields evaluated.`,
       });
     } catch (e) {
       setEnrichError(e instanceof Error ? e.message : "Enrichment failed");
@@ -251,6 +272,11 @@ export default function ApartmentDetailPage() {
           <div className="flex gap-2 text-xs text-destructive mt-3">
             <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
             <span>{enrichError}</span>
+          </div>
+        )}
+        {(enriching || agentEvents.length > 0) && (
+          <div className="mt-3">
+            <AgentProgress events={agentEvents} active={enriching} />
           </div>
         )}
         {aiNotes && (
